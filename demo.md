@@ -52,29 +52,6 @@ cd vm
 cd daemon && ./build-image.sh --build-only && cd ..
 ```
 
-### 2. 不启动 VM 也能玩（最快验证）
-
-如果只想验证 RPC 协议，不需要镜像，不需要 VM：
-
-```bash
-node demo.mjs --skip-vm
-```
-
-这会在 macOS 上直接启动 Rust daemon（TCP 模式），然后通过 JSON-RPC 和它交互。几秒钟就能看到结果。
-
-手动测试更直接：
-
-```bash
-# 终端 1：启动 daemon
-cd daemon && cargo run
-
-# 终端 2：用 nc 发 JSON-RPC
-echo '{"id":1,"method":"spawn","params":{"id":"s1","name":"test","command":"echo","args":["hello"]}}' | nc localhost 9100
-echo '{"id":2,"method":"readFile","params":{"filePath":"/etc/hosts"}}' | nc localhost 9100
-```
-
----
-
 ## 完整 VM 模式
 
 完整模式会真正启动一台 Linux 虚拟机，通过 vsock 与 Guest 通信。这需要一个 UEFI 可启动的 rootfs.img。
@@ -190,7 +167,7 @@ cd daemon && ./build-image.sh --build-only && cd ..
 
 # 获取 + 定制 rootfs
 ./get-base-image.sh
-./customize-rootfs.sh rootfs.img
+./customize-rootfs.sh ubuntu-22.04-server-cloudimg-arm64.img
 mkdir -p bundle && cp rootfs.img bundle/
 
 # 运行
