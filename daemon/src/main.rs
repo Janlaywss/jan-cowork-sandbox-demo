@@ -11,6 +11,7 @@ mod network;
 mod process;
 mod rpc;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -18,6 +19,11 @@ use process::ProcessManager;
 use rpc::Dispatcher;
 
 const VSOCK_PORT: u32 = 9100;
+
+#[cfg(target_os = "linux")]
+const SESSIONS_DIR: &str = "/sessions";
+#[cfg(not(target_os = "linux"))]
+const SESSIONS_DIR: &str = "/tmp/janwork-sessions";
 
 #[tokio::main]
 async fn main() {
@@ -52,7 +58,8 @@ async fn main() {
 
     info!("[janwork] starting janworkd");
 
-    let pm = Arc::new(ProcessManager::new());
+    let sessions_dir = ensure_sessions_dir();
+    let pm = Arc::new(ProcessManager::new(&sessions_dir));
     let dispatcher = Arc::new(Dispatcher::new(pm.clone()));
 
     #[cfg(target_os = "linux")]
@@ -64,6 +71,79 @@ async fn main() {
     {
         listen_tcp(dispatcher).await;
     }
+}
+
+// ── Sessions directory initialization ──
+
+/// Ensure the sessions directory is available.
+///
+/// On Linux (inside VM):
+///   1. If already mounted (sessiondata.img present), done.
+///   2. Try to mount the disk with LABEL=sessions.
+///   3. Fall back to creating /sessions on the rootfs.
+///
+/// On macOS (testing): creates /tmp/janwork-sessions.
+fn ensure_sessions_dir() -> PathBuf {
+    let dir = PathBuf::from(SESSIONS_DIR);
+
+    #[cfg(target_os = "linux")]
+    {
+        // Already mounted — nothing to do
+        if is_mountpoint(SESSIONS_DIR) {
+            info!("[janwork] {SESSIONS_DIR} is already mounted (sessiondata disk)");
+            return dir;
+        }
+
+        // Try to mount LABEL=sessions
+        let label_dev = std::path::Path::new("/dev/disk/by-label/sessions");
+        if label_dev.exists() {
+            let _ = std::fs::create_dir_all(SESSIONS_DIR);
+            match std::process::Command::new("mount")
+                .args(["-t", "ext4", "/dev/disk/by-label/sessions", SESSIONS_DIR])
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    info!("[janwork] mounted LABEL=sessions at {SESSIONS_DIR}");
+                    return dir;
+                }
+                Ok(out) => {
+                    warn!(
+                        "[janwork] mount LABEL=sessions failed: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                }
+                Err(e) => warn!("[janwork] mount command failed: {e}"),
+            }
+        } else {
+            warn!("[janwork] no disk with LABEL=sessions found");
+        }
+
+        // Fallback: create on rootfs
+        if let Err(e) = std::fs::create_dir_all(SESSIONS_DIR) {
+            warn!("[janwork] failed to create {SESSIONS_DIR} on rootfs: {e}");
+        } else {
+            info!("[janwork] created {SESSIONS_DIR} on rootfs (no sessiondata disk)");
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Err(e) = std::fs::create_dir_all(SESSIONS_DIR) {
+            warn!("[janwork] failed to create {SESSIONS_DIR}: {e}");
+        } else {
+            info!("[janwork] using {SESSIONS_DIR} for sessions (test mode)");
+        }
+    }
+
+    dir
+}
+
+#[cfg(target_os = "linux")]
+fn is_mountpoint(path: &str) -> bool {
+    std::process::Command::new("mountpoint")
+        .args(["-q", path])
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 // ── /dev/hvc0 writer for tracing (Linux only) ──

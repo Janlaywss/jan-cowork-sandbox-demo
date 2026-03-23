@@ -9,6 +9,7 @@
 //! See vm.md §11 for the full isolation model.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 
 use tokio::io::AsyncWriteExt;
@@ -23,12 +24,14 @@ struct ManagedProcess {
 }
 
 pub struct ProcessManager {
+    sessions_dir: PathBuf,
     processes: Mutex<HashMap<String, ManagedProcess>>,
 }
 
 impl ProcessManager {
-    pub fn new() -> Self {
+    pub fn new(sessions_dir: impl Into<PathBuf>) -> Self {
         Self {
+            sessions_dir: sessions_dir.into(),
             processes: Mutex::new(HashMap::new()),
         }
     }
@@ -55,15 +58,20 @@ impl ProcessManager {
             return Err(format!("process {id} already exists"));
         }
 
+        // Create per-session directory: {sessions_dir}/{id}/
+        let session_dir = self.sessions_dir.join(id);
+        std::fs::create_dir_all(&session_dir)
+            .map_err(|e| format!("failed to create session dir {}: {e}", session_dir.display()))?;
+        info!("[process:{id}] session dir: {}", session_dir.display());
+
         let mut cmd = Command::new(command);
         cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
+        // Use caller-specified cwd, or fall back to the session directory
+        cmd.current_dir(cwd.unwrap_or_else(|| session_dir.to_str().unwrap_or("/")));
 
         for (k, v) in env {
             cmd.env(k, v);
@@ -142,10 +150,17 @@ impl ProcessManager {
 
         // Store the exit handle ID for later cleanup
         let cleanup_id = id.to_string();
+        let cleanup_dir = session_dir.clone();
         tokio::spawn(async move {
             let _code = exit_handle.await;
-            info!("[process:{cleanup_id}] all processes exited, proceeding with cleanup");
-            // In production: cleanup cgroup, unmount VirtioFS, remove session dir
+            info!("[process:{cleanup_id}] exited, cleaning up session dir");
+            // In production: also cleanup cgroup and unmount VirtioFS
+            if let Err(e) = std::fs::remove_dir_all(&cleanup_dir) {
+                warn!(
+                    "[process:{cleanup_id}] failed to remove session dir {}: {e}",
+                    cleanup_dir.display()
+                );
+            }
         });
 
         Ok(())
