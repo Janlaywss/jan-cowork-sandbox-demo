@@ -20,34 +20,15 @@
 
 我们用 ~2000 行代码重新实现了这套机制的核心链路：
 
-| 层级 | 生产环境 | 本项目 |
-|------|---------|--------|
-| JS → Native 桥接 | `@ant/claude-swift` (N-API) | `build/smolvm.node` (Swift N-API addon) |
-| VM 管理 | `CoworkVMManager` (Swift) | `JanworkVMManager` (Swift, ~570 行) |
-| 虚拟化 | Apple Virtualization.framework | 同上 |
-| Host↔Guest 通信 | vsock + JSON-RPC | 同上 |
-| Guest 守护进程 | `coworkd` (Go, 7.8MB) | `janworkd` (Rust, 715KB) |
-| 系统镜像 | Anthropic 定制 Ubuntu | 标准 Ubuntu cloud image + 注入 |
+| 层级             | 本项目  |
+|----------------|--------|
+| JS → Native 桥接 | `build/smolvm.node` (Swift N-API addon) |
+| VM 管理          |`JanworkVMManager` (Swift, ~570 行) |
+| 虚拟化            | Apple Virtualization.framework |
+| Host↔Guest 通信  | vsock + JSON-RPC |
+| Guest 守护进程     | `janworkd` (Rust, 715KB) |
+| 系统镜像           | 标准 Ubuntu cloud image + 注入 |
 
-## 30 秒体验（不需要 VM）
-
-先感受一下 RPC 协议，不需要镜像、不需要虚拟机：
-
-```bash
-cd vm
-./build.sh && ./sign.sh        # 编译 Swift addon
-node demo.mjs --skip-vm        # 在 macOS 上直接跑 daemon + RPC
-```
-
-或者更原始的方式——两个终端，一行 JSON：
-
-```bash
-# 终端 1
-cd vm/daemon && cargo run
-
-# 终端 2
-echo '{"id":1,"method":"spawn","params":{"id":"s1","name":"test","command":"echo","args":["hello"]}}' | nc localhost 9100
-```
 
 ## 完整 VM 模式
 
