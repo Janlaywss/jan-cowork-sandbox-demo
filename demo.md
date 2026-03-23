@@ -109,7 +109,7 @@ qemu-img resize -f raw rootfs.img 10G
 
 ```bash
 # 注入 janworkd daemon + systemd 服务 + vsock 模块配置
-./customize-rootfs.sh rootfs.img
+./customize-rootfs.sh ubuntu-22.04-server-cloudimg-arm64.img
 
 # 放入 bundle 目录
 mkdir -p bundle && cp rootfs.img bundle/
