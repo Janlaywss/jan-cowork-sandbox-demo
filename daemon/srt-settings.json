@@ -1,0 +1,35 @@
+{
+  "network": {
+    "allowedDomains": [
+      "registry.npmjs.org",
+      "npmjs.com",
+      "yarnpkg.com",
+      "registry.yarnpkg.com",
+      "pypi.org",
+      "files.pythonhosted.org",
+      "github.com",
+      "archive.ubuntu.com",
+      "security.ubuntu.com",
+      "api.anthropic.com",
+      "*.anthropic.com",
+      "anthropic.com",
+      "crates.io",
+      "index.crates.io",
+      "static.crates.io",
+      "statsig.anthropic.com",
+      "sentry.io",
+      "*.sentry.io"
+    ],
+    "deniedDomains": [],
+    "allowLocalBinding": true,
+    "mitmProxy": {
+      "socketPath": "/var/run/mitm-proxy.sock",
+      "domains": ["*.anthropic.com", "anthropic.com"]
+    }
+  },
+  "filesystem": {
+    "denyRead": [],
+    "allowWrite": ["/"],
+    "denyWrite": []
+  }
+}

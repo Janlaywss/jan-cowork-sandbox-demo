@@ -1,0 +1,4 @@
+module CNapi [system] {
+    header "napi_bridge.h"
+    export *
+}

@@ -1,0 +1,23 @@
+[package]
+name = "janworkd"
+version = "0.1.0"
+edition = "2021"
+description = "Demo implementation of sdk-daemon (janworkd) — the Guest-side RPC daemon for JanworkVM"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+
+# vsock support (Linux only, used inside the VM)
+[target.'cfg(target_os = "linux")'.dependencies]
+vsock = "0.5"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
