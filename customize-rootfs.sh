@@ -105,7 +105,7 @@ echo ""
 
 # ── Step 1: Convert to raw if needed ──
 
-echo "[1/7] Preparing raw disk image..."
+echo "[1/10] Preparing raw disk image..."
 
 FILE_TYPE=$(file "$IMAGE")
 if echo "$FILE_TYPE" | grep -q "QCOW2"; then
@@ -132,7 +132,7 @@ echo "  $(ls -lh "$OUTPUT" | awk '{print $5}') (sparse)"
 
 # ── Step 2: Attach and find ext4 partition ──
 
-echo "[2/7] Attaching disk image..."
+echo "[2/10] Attaching disk image..."
 
 ATTACH_OUT=$(hdiutil attach "$OUTPUT" -nomount 2>&1)
 DEVICE=$(echo "$ATTACH_OUT" | head -1 | awk '{print $1}')
@@ -158,13 +158,14 @@ trap cleanup EXIT
 
 # ── Step 3: Verify & resize filesystem ──
 
-echo "[3/7] Checking ext4 filesystem..."
-e2fsck -fy "$EXT4_DEV" 2>&1 | tail -3
+echo "[3/10] Checking ext4 filesystem..."
+# e2fsck returns 1 when it fixes errors (expected for modified images), so allow non-zero exit
+e2fsck -fy "$EXT4_DEV" 2>&1 | tail -3 || true
 echo "  Filesystem ready"
 
 # ── Step 4: Install janworkd.service ──
 
-echo "[4/7] Installing janworkd.service..."
+echo "[4/10] Installing janworkd.service..."
 
 UNIT_FILE=$(mktemp /tmp/janworkd.XXXXXX.service)
 cat > "$UNIT_FILE" << 'UNIT'
@@ -194,10 +195,12 @@ WantedBy=multi-user.target
 UNIT
 
 debugfs -w "$EXT4_DEV" <<EOF 2>/dev/null
+rm /etc/systemd/system/janworkd.service
 write $UNIT_FILE /etc/systemd/system/janworkd.service
 set_inode_field /etc/systemd/system/janworkd.service mode 0100644
 mkdir /etc/systemd/system/multi-user.target.wants
-link /etc/systemd/system/janworkd.service /etc/systemd/system/multi-user.target.wants/janworkd.service
+rm /etc/systemd/system/multi-user.target.wants/janworkd.service
+symlink /etc/systemd/system/multi-user.target.wants/janworkd.service /etc/systemd/system/janworkd.service
 quit
 EOF
 rm -f "$UNIT_FILE"
@@ -205,7 +208,7 @@ echo "  /etc/systemd/system/janworkd.service ✓"
 
 # ── Step 5: Install sdk-daemon + sandbox-helper ──
 
-echo "[5/7] Installing binaries..."
+echo "[5/10] Installing binaries..."
 
 if [[ "$SKIP_DAEMON" == "true" ]]; then
     echo "  Skipped (--skip-daemon)"
@@ -234,7 +237,7 @@ fi
 
 # ── Step 6: Set hostname ──
 
-echo "[6/7] Setting hostname..."
+echo "[6/10] Setting hostname..."
 
 HFILE=$(mktemp /tmp/hostname.XXXXXX)
 echo "claude" > "$HFILE"
@@ -249,7 +252,7 @@ echo "  /etc/hostname = claude ✓"
 
 # ── Step 7: Install srt-settings.json + create /smol/bin ──
 
-echo "[7/8] Enabling vsock kernel modules..."
+echo "[7/10] Enabling vsock kernel modules..."
 
 VSOCK_CONF=$(mktemp /tmp/vsock-modules.XXXXXX)
 printf 'vsock\nvirtio_vsock\nvhost_vsock\n' > "$VSOCK_CONF"
@@ -262,7 +265,49 @@ EOF
 rm -f "$VSOCK_CONF"
 echo "  /etc/modules-load.d/vsock.conf ✓"
 
-echo "[8/8] Installing srt-settings.json..."
+echo "[8/10] Patching GRUB for virtio console (console=hvc0)..."
+
+# Ubuntu cloud images use console=ttyAMA0 (PL011 UART) which doesn't exist under
+# Apple's Virtualization.framework. We need console=hvc0 (virtio console) so that:
+#   1. Kernel boot messages appear on the host serial pipe
+#   2. The kernel doesn't hang waiting for a nonexistent UART device
+GRUB_CFG=$(mktemp /tmp/grub.cfg.XXXXXX)
+debugfs -R 'cat /boot/grub/grub.cfg' "$EXT4_DEV" 2>/dev/null > "$GRUB_CFG"
+if [[ -s "$GRUB_CFG" ]]; then
+    # Replace ttyAMA0/ttyS0 with hvc0, remove "quiet splash" so boot messages are visible
+    sed -i.bak \
+        -e 's/console=ttyAMA0/console=hvc0/g' \
+        -e 's/console=ttyS0/console=hvc0/g' \
+        -e 's/quiet splash//g' \
+        "$GRUB_CFG"
+    debugfs -w "$EXT4_DEV" <<EOF 2>/dev/null
+rm /boot/grub/grub.cfg
+write $GRUB_CFG /boot/grub/grub.cfg
+set_inode_field /boot/grub/grub.cfg mode 0100644
+quit
+EOF
+    echo "  /boot/grub/grub.cfg patched (console=hvc0) ✓"
+else
+    echo "  Warning: could not read /boot/grub/grub.cfg"
+fi
+rm -f "$GRUB_CFG" "${GRUB_CFG}.bak"
+
+echo "[9/10] Disabling cloud-init (speeds up first boot by ~2 min)..."
+
+# cloud-init on Ubuntu cloud images tries to find a metadata service on first boot,
+# which times out and delays startup significantly inside a bare VM.
+CLOUD_DISABLE=$(mktemp /tmp/cloud-init-disabled.XXXXXX)
+touch "$CLOUD_DISABLE"
+debugfs -w "$EXT4_DEV" <<EOF 2>/dev/null
+mkdir /etc/cloud
+write $CLOUD_DISABLE /etc/cloud/cloud-init.disabled
+set_inode_field /etc/cloud/cloud-init.disabled mode 0100644
+quit
+EOF
+rm -f "$CLOUD_DISABLE"
+echo "  /etc/cloud/cloud-init.disabled ✓"
+
+echo "[10/10] Installing srt-settings.json..."
 
 SRT="$SCRIPT_DIR/daemon/srt-settings.json"
 if [[ -f "$SRT" ]]; then

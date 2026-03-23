@@ -126,7 +126,8 @@ mkdir -p bundle && cp rootfs.img bundle/
 | 5 | sandbox-helper (stub) | `/usr/local/bin/sandbox-helper` |
 | 6 | hostname = claude | `/etc/hostname` |
 | 7 | vsock 内核模块自动加载 | `/etc/modules-load.d/vsock.conf` |
-| 8 | srt-settings.json | `/smol/bin/srt-settings.json` |
+| 8 | 禁用 cloud-init（加速首次启动） | `/etc/cloud/cloud-init.disabled` |
+| 9 | srt-settings.json | `/smol/bin/srt-settings.json` |
 
 ### 运行完整 demo
 

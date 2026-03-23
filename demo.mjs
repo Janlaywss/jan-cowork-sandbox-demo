@@ -119,14 +119,34 @@ async function main() {
     if (!skipVM && !useTcp) {
         // ── vsock path: daemon runs INSIDE the VM ──
         console.log('Waiting for guest daemon on vsock port 9100...');
-        console.log('  (daemon starts from /smol/bin/sdk-daemon inside the VM)');
+        console.log('  (daemon starts from /usr/local/bin/sdk-daemon inside the VM)');
+        console.log('  (first boot may take 60-90s while guest OS initializes)');
+
+        // Show VM console output while waiting so the user can see boot progress
+        let consoleInterval;
+        let lastConsoleLen = 0;
+        if (vm) {
+            consoleInterval = setInterval(() => {
+                const tail = vm.getConsoleTail();
+                if (tail && tail.length > lastConsoleLen) {
+                    const newLines = tail.slice(lastConsoleLen).split('\n').filter(Boolean);
+                    for (const l of newLines.slice(-3)) {
+                        console.log(`  \x1b[90m[guest] ${l.slice(0, 120)}\x1b[0m`);
+                    }
+                    lastConsoleLen = tail.length;
+                }
+            }, 2000);
+        }
+
         try {
-            await rpc.connectVsock(vm, DAEMON_PORT, { timeout: 30000 });
+            await rpc.connectVsock(vm, DAEMON_PORT, { timeout: 120000, retryInterval: 1000 });
         } catch (e) {
             console.log(`  vsock connect failed: ${e.message}`);
             console.log('  Falling back to TCP mode (starting local daemon)...');
             daemon = await startLocalDaemon();
             await rpc.connectTcp('127.0.0.1', DAEMON_PORT);
+        } finally {
+            if (consoleInterval) clearInterval(consoleInterval);
         }
     } else {
         // ── TCP path: start daemon locally ──
