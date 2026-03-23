@@ -8,9 +8,8 @@
 │  Node.js (demo.mjs)              │     │  Ubuntu 22.04               │
 │  ├─ Swift N-API addon            │     │  ├─ UEFI → GRUB → kernel   │
 │  │   Virtualization.framework    │     │  ├─ systemd                 │
-│  │   createVM / startVM / vsock  │     │  └─ janworkd (Rust daemon)  │
-│  └─ JSON-RPC client             │────→│     vsock:9100               │
-│                                  │vsock│     spawn / kill / readFile │
+│  └─ JSON-RPC client             │────→│  └─ janworkd (Rust daemon)  │
+│                                  │vsock│     vsock:9100               │
 └──────────────────────────────────┘     └─────────────────────────────┘
 ```
 
@@ -29,42 +28,110 @@
 | Guest 守护进程     | `janworkd` (Rust, 715KB) |
 | 系统镜像           | 标准 Ubuntu cloud image + 注入 |
 
+## 快速开始
 
-## 完整 VM 模式
-
-真正启动一台 Linux 虚拟机，通过 vsock 通信。
-
-### 前置依赖
+### 前置依赖（一次性）
 
 ```bash
-# Rust 交叉编译工具链
+# Rust 工具链（用于交叉编译 Guest 端 daemon）
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source ~/.cargo/env
 rustup target add aarch64-unknown-linux-musl
 
-# macOS 工具
+# macOS 工具（e2fsprogs 用于写入 ext4 分区，qemu 用于镜像格式转换）
 brew install e2fsprogs qemu
 ```
 
-### 构建 + 运行
+### 构建
 
 ```bash
 cd vm
 
-# 1. 编译 Swift addon + 签名（赋予虚拟化 entitlement）
+# Swift addon（编译 + 签名，签名赋予虚拟化 entitlement）
 ./build.sh && ./sign.sh
 
-# 2. 交叉编译 Rust daemon（macOS 上编译出 Linux aarch64 静态二进制）
+# Rust daemon（交叉编译为 Linux aarch64 静态二进制）
 cd daemon && ./build-image.sh --build-only && cd ..
+```
 
-# 3. 下载 Ubuntu cloud image → 转为 raw 格式 → 扩容 10GB
+### 不启动 VM 也能玩（最快验证）
+
+如果只想验证 RPC 协议，不需要镜像，不需要 VM：
+
+```bash
+node demo.mjs --skip-vm
+```
+
+这会在 macOS 上直接启动 Rust daemon（TCP 模式），然后通过 JSON-RPC 和它交互。几秒钟就能看到结果。
+
+手动测试更直接：
+
+```bash
+# 终端 1：启动 daemon
+cd daemon && cargo run
+
+# 终端 2：用 nc 发 JSON-RPC
+echo '{"id":1,"method":"spawn","params":{"id":"s1","name":"test","command":"echo","args":["hello"]}}' | nc localhost 9100
+echo '{"id":2,"method":"readFile","params":{"filePath":"/etc/hosts"}}' | nc localhost 9100
+```
+
+## 完整 VM 模式
+
+真正启动一台 Linux 虚拟机，通过 vsock 与 Guest 通信。这需要一个 UEFI 可启动的 rootfs.img。
+
+### 获取 Base Image
+
+Apple 的 `Virtualization.framework` 使用 `VZEFIBootLoader`，要求磁盘是 GPT 分区、带有 EFI System Partition。好消息是 Ubuntu 22.04 的 arm64 cloud image 自带 GPT + EFI 分区（partition 15），可以直接用于 UEFI 启动。
+
+运行脚本自动下载并转换为 raw 格式：
+
+```bash
 ./get-base-image.sh
+```
 
-# 4. 注入 daemon + systemd 服务 + 网络配置到镜像中
+它会做三件事：
+1. 从 `cloud-images.ubuntu.com` 下载 Ubuntu 22.04 cloud image（~700MB）
+2. 将 QCOW2 格式转为 raw 格式
+3. 扩容到 10GB（sparse，不占实际磁盘空间）
+
+也可以手动操作：
+
+```bash
+curl -LO https://cloud-images.ubuntu.com/releases/22.04/release/ubuntu-22.04-server-cloudimg-arm64.img
+brew install qemu
+qemu-img convert -f qcow2 -O raw ubuntu-22.04-server-cloudimg-arm64.img rootfs.img
+qemu-img resize -f raw rootfs.img 10G
+```
+
+### 定制 rootfs
+
+拿到 base image 后，注入我们的 Rust daemon：
+
+```bash
+# 注入 janworkd daemon + systemd 服务 + vsock 模块配置
 ./customize-rootfs.sh rootfs.img
 
-# 5. 启动
+# 放入 bundle 目录
 mkdir -p bundle && cp rootfs.img bundle/
+```
+
+`customize-rootfs.sh` 用 `e2fsprogs` 的 `debugfs` 在 macOS 上直接写入 ext4 分区（不需要 mount、不需要 Linux 环境），写入内容：
+
+| 步骤 | 写入内容 | Guest 内路径 |
+|------|---------|-------------|
+| 1 | QCOW2 → raw 转换 + 扩容 10G | — |
+| 2 | ext4 文件系统检查 (e2fsck) | — |
+| 3 | janworkd.service (systemd) | `/etc/systemd/system/` |
+| 4 | sdk-daemon (Rust 二进制) | `/usr/local/bin/sdk-daemon` |
+| 5 | sandbox-helper (stub) | `/usr/local/bin/sandbox-helper` |
+| 6 | hostname = claude | `/etc/hostname` |
+| 7 | vsock 内核模块自动加载 | `/etc/modules-load.d/vsock.conf` |
+| 8 | 禁用 cloud-init（加速首次启动） | `/etc/cloud/cloud-init.disabled` |
+| 9 | srt-settings.json | `/smol/bin/srt-settings.json` |
+
+### 运行完整 demo
+
+```bash
 node demo.mjs
 ```
 
@@ -86,7 +153,7 @@ Starting VM (8GB, 3 disks, UEFI boot)...
 
 [Phase 3] RPC Calls
 installSdk...
-  → v99999222
+  → v99999222              ← 确认是我们的 Rust daemon 在响应
 spawn "echo" process...
   → running=false exitCode=0
 readFile /etc/hosts...
@@ -98,30 +165,66 @@ VM stopped
 === Demo Complete ===
 ```
 
+## 一步到位
+
+如果你只想最快跑通完整 VM 模式：
+
+```bash
+# 安装依赖
+brew install e2fsprogs qemu
+rustup target add aarch64-unknown-linux-musl
+
+# 构建
+cd vm
+./build.sh && ./sign.sh
+cd daemon && ./build-image.sh --build-only && cd ..
+
+# 获取 + 定制 rootfs
+./get-base-image.sh
+./customize-rootfs.sh rootfs.img
+mkdir -p bundle && cp rootfs.img bundle/
+
+# 运行
+node demo.mjs
+```
+
+## 运行模式
+
+| 模式 | 命令 | 需要镜像 | 说明 |
+|------|------|---------|------|
+| **跳过 VM** | `node demo.mjs --skip-vm` | 否 | macOS 上直接跑 daemon（TCP），最快验证 RPC |
+| **完整 VM** | `node demo.mjs` | 是 | 真实虚拟机 + vsock 通信 |
+| **TCP 调试** | `node demo.mjs --tcp` | 是 | 启动 VM 但 daemon 走 TCP（方便抓包） |
+
 ## 项目结构
 
 ```
 vm/
-├── demo.mjs                    # Demo 入口，驱动完整流程
-├── rpc-client.mjs              # JSON-RPC 客户端（vsock / TCP 双通道）
-│
-├── Sources/                    # Swift N-API addon（宿主机侧）
-│   ├── JanworkVMManager.swift  #   VM 管理：3-disk、UEFI boot、vsock、balloon
-│   ├── NAPIModule.swift        #   N-API 方法注册（vm.createVM / startVM / ...）
-│   └── NAPIHelpers.swift       #   N-API 类型转换工具
-│
-├── daemon/                     # Rust daemon（Guest 侧）
-│   └── src/
-│       ├── main.rs             #   入口：vsock 监听（Linux）/ TCP 监听（macOS 测试）
-│       ├── rpc.rs              #   JSON-RPC 分发（8 个方法）
-│       ├── process.rs          #   进程管理：spawn / kill / stdin / stdout 转发
-│       └── network.rs          #   域名白名单过滤
-│
-├── get-base-image.sh           # 下载 Ubuntu cloud image + QCOW2→raw 转换
-├── customize-rootfs.sh         # 注入 daemon 到镜像（debugfs 写入 ext4）
-├── build.sh                    # Swift 编译
-├── sign.sh                     # 代码签名（虚拟化 entitlement）
-└── js/index.js                 # SwiftAddon EventEmitter 封装
+├── demo.mjs                 # Demo 入口，驱动完整流程
+├── rpc-client.mjs           # JSON-RPC 客户端 (vsock/TCP 双通道)
+├── get-base-image.sh        # 获取 UEFI 可启动的 base image
+├── customize-rootfs.sh      # rootfs 定制脚本
+├── js/index.js              # SwiftAddon EventEmitter 封装
+├── build.sh                 # Swift addon 构建脚本
+├── sign.sh                  # 代码签名 (虚拟化 entitlement)
+├── entitlements.plist       # com.apple.security.virtualization
+├── Package.swift            # Swift 包清单
+├── Sources/
+│   ├── JanworkVMManager.swift  # VM 管理器 (3-disk, vsock, balloon)
+│   ├── NAPIModule.swift        # N-API 注册 (vm namespace)
+│   ├── NAPIHelpers.swift       # N-API 工具函数
+│   ├── napi_bridge.h
+│   └── module.modulemap
+└── daemon/
+    ├── Cargo.toml
+    ├── build-image.sh       # 交叉编译 + exFAT 打包
+    ├── srt-settings.json    # 网络域名白名单
+    ├── .cargo/config.toml   # 交叉编译配置
+    └── src/
+        ├── main.rs          # 入口, vsock/TCP 监听
+        ├── rpc.rs           # JSON-RPC 分发
+        ├── process.rs       # 进程管理 (spawn/kill/stdin)
+        └── network.rs       # 域名过滤
 ```
 
 ## 工作原理
@@ -156,18 +259,18 @@ vm.start(completionHandler: ...)
 
 `janworkd` 是一个 715KB 的静态编译二进制，开机通过 systemd 自启动，监听 vsock 端口 9100。
 
-支持的 JSON-RPC 方法：
+支持的 JSON-RPC 方法（对应 vm.md §8.3）：
 
-| 方法 | 说明 |
-|------|------|
-| `spawn` | 创建进程（支持 cwd、env、域名白名单） |
-| `kill` | 发信号终止进程 |
-| `writeStdin` | 向进程 stdin 写数据 |
-| `isRunning` | 查询进程状态和退出码 |
-| `readFile` | 读取 Guest 内文件 |
-| `getMemoryInfo` | 读取 `/proc/meminfo` 返回内存信息 |
-| `installSdk` | SDK 安装（demo 返回固定版本） |
-| `addApprovedOauthToken` | OAuth token 注入（demo 仅打印） |
+| 方法 | 参数 | 说明 |
+|------|------|------|
+| `spawn` | id, name, command, args, cwd, env | 创建进程（支持 cwd、env、域名白名单） |
+| `kill` | id, signal | 发送信号终止进程 |
+| `writeStdin` | id, data | 向进程 stdin 写数据 |
+| `isRunning` | id | 查询进程状态和退出码 |
+| `readFile` | filePath | 读取 Guest 内文件 |
+| `getMemoryInfo` | — | Guest 内存信息（Linux 上读 /proc/meminfo） |
+| `installSdk` | sdkSubpath, version | 安装 SDK（demo 返回固定版本号） |
+| `addApprovedOauthToken` | token | 注入 OAuth token（demo 仅打印） |
 
 通信协议是换行分隔的 JSON-RPC：
 
@@ -190,14 +293,6 @@ Ubuntu cloud image (QCOW2, ~700MB)
       /etc/modules-load.d/vsock.conf   ← 加载 vsock 内核模块
       /smol/bin/srt-settings.json      ← 网络域名白名单
 ```
-
-## 运行模式
-
-| 模式 | 命令 | 需要镜像 | 说明 |
-|------|------|---------|------|
-| **跳过 VM** | `node demo.mjs --skip-vm` | 否 | macOS 上直接跑 daemon（TCP），最快验证 RPC |
-| **完整 VM** | `node demo.mjs` | 是 | 真实虚拟机 + vsock 通信 |
-| **TCP 调试** | `node demo.mjs --tcp` | 是 | 启动 VM 但 daemon 走 TCP（方便抓包） |
 
 ## 系统要求
 
